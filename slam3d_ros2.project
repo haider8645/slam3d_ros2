@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CodeLite_Project Name="slam3d_ros2" Version="10.0.0" InternalType="">
+  <VirtualDirectory Name="src">
+    <File Name="src/pointcloud_mapper.cpp"/>
+  </VirtualDirectory>
   <VirtualDirectory Name="build">
+    <File Name="manifest.xml"/>
     <File Name="package.xml"/>
     <File Name="CMakeLists.txt"/>
   </VirtualDirectory>
