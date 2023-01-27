@@ -5,6 +5,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <tf2_ros/transform_listener.h>
 
 #include <slam3d/graph/boost/BoostGraph.hpp>
 #include <slam3d/solver/g2o/G2oSolver.hpp>
@@ -24,6 +25,11 @@ timeval fromRosTime(const rclcpp::Time& rt)
 	return t;
 }
 
+rclcpp::Time fromTimeval(const timeval& tv)
+{
+	return rclcpp::Time(tv.tv_sec, tv.tv_usec * 1000, RCL_CLOCK_UNINITIALIZED);
+}
+
 class RosClock : public slam3d::Clock
 {
 public:
@@ -37,11 +43,62 @@ private:
 	rclcpp::Node* mNode;
 };
 
+class TfOdometry : public slam3d::PoseSensor
+{
+public:
+	TfOdometry(slam3d::Graph* g, slam3d::Logger* l, tf2_ros::Buffer* tf)
+	: slam3d::PoseSensor("Odometry", g, l), mTfBuffer(tf){}
+	
+	slam3d::Transform getPose(timeval stamp)
+	{
+		geometry_msgs::msg::TransformStamped tf_msg;
+		try
+		{
+			tf_msg = mTfBuffer->lookupTransform("base_link", "odometry", fromTimeval(stamp), 50ms);
+		}catch (const tf2::TransformException & ex)
+		{
+			throw slam3d::InvalidPose(ex.what());
+		}
+		Eigen::Vector3d trans(tf_msg.transform.translation.x,
+		                      tf_msg.transform.translation.y,
+		                      tf_msg.transform.translation.z);
+		Eigen::Quaterniond quat(tf_msg.transform.rotation.w,
+		                        tf_msg.transform.rotation.x,
+		                        tf_msg.transform.rotation.y,
+		                        tf_msg.transform.rotation.z);
+		slam3d::Transform tf(quat);
+		tf.translation() = trans;
+		return tf;
+	}
+	
+	void handleNewVertex(slam3d::IdType vertex)
+	{
+		timeval stamp = mGraph->getVertex(vertex).measurement->getTimestamp();
+		slam3d::Transform currentPose = getPose(stamp);
+		
+		if(mLastVertex > 0)
+		{
+			slam3d::Transform t = mLastOdometricPose.inverse() * currentPose;
+			slam3d::SE3Constraint::Ptr se3(new slam3d::SE3Constraint(mName, t, slam3d::Covariance<6>::Identity() * mCovarianceScale));
+			mGraph->addConstraint(mLastVertex, vertex, se3);
+			mGraph->setCorrectedPose(vertex, mGraph->getVertex(mLastVertex).corrected_pose * t);
+		}
+		
+		mLastVertex = vertex;
+		mLastOdometricPose = currentPose;
+	}
+	
+private:
+	tf2_ros::Buffer* mTfBuffer;
+	slam3d::Transform mLastOdometricPose;
+	slam3d::IdType mLastVertex;
+
+};
 
 class PointcloudMapper : public rclcpp::Node
 {
 public:
-	PointcloudMapper() : Node("pointcloud_mapper"), mClock(this)
+	PointcloudMapper() : Node("pointcloud_mapper"), mClock(this), mTfBuffer(this->get_clock()), mTfListener(mTfBuffer)
 	{
 		mLogger = new slam3d::Logger(mClock);
 		mGraph = new slam3d::BoostGraph(mLogger);
@@ -53,6 +110,9 @@ public:
 		mMapper = new slam3d::Mapper(mGraph, mLogger, slam3d::Transform::Identity());
 		mMapper->registerSensor(mPclSensor);
 		
+		mTfOdom = new TfOdometry(mGraph, mLogger, &mTfBuffer);
+		mMapper->registerPoseSensor(mTfOdom);
+		
 	}
 
 private:
@@ -63,8 +123,11 @@ private:
 	slam3d::PointCloudSensor* mPclSensor;
 	RosClock mClock;
 	slam3d::Logger* mLogger;
+	TfOdometry* mTfOdom;
 	
 	rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mPublisher;
+	tf2_ros::Buffer mTfBuffer;
+	tf2_ros::TransformListener mTfListener;
 };
 
 int main(int argc, char * argv[])
