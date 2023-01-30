@@ -4,7 +4,7 @@
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
-#include <std_msgs/msg/string.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_listener.h>
 
 #include <slam3d/graph/boost/BoostGraph.hpp>
@@ -113,9 +113,18 @@ public:
 		mTfOdom = new TfOdometry(mGraph, mLogger, &mTfBuffer);
 		mMapper->registerPoseSensor(mTfOdom);
 		
+		mScanSubscriber = create_subscription<sensor_msgs::msg::PointCloud2>(
+			"scan", 10, std::bind(&PointcloudMapper::scanCallback, this, _1));
+		
+		mMapPublisher = create_publisher<sensor_msgs::msg::PointCloud2>("map", 1);
 	}
 
 private:
+
+	void scanCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) const
+	{
+		
+	}
 
 	slam3d::Mapper* mMapper;
 	slam3d::BoostGraph* mGraph;
@@ -125,7 +134,9 @@ private:
 	slam3d::Logger* mLogger;
 	TfOdometry* mTfOdom;
 	
-	rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mPublisher;
+	rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr mMapPublisher;
+	rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr mScanSubscriber;
+	
 	tf2_ros::Buffer mTfBuffer;
 	tf2_ros::TransformListener mTfListener;
 };

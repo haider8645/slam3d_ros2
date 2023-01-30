@@ -5,7 +5,7 @@ project(slam3d_ros2)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(tf2_ros REQUIRED)
-find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(slam3d 2.5 REQUIRED)
 
 add_executable(pointcloud_mapper
@@ -15,7 +15,7 @@ add_executable(pointcloud_mapper
 target_link_libraries(pointcloud_mapper PRIVATE
 	rclcpp::rclcpp
 	tf2_ros::tf2_ros
-	${std_msgs_TARGETS}
+	${sensor_msgs_TARGETS}
 	slam3d::solver-g2o
 	slam3d::graph-boost
 	slam3d::sensor-pcl
