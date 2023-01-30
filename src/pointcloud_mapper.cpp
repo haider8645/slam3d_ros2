@@ -6,6 +6,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_listener.h>
+#include <pcl_conversions/pcl_conversions.h>
 
 #include <slam3d/graph/boost/BoostGraph.hpp>
 #include <slam3d/solver/g2o/G2oSolver.hpp>
@@ -114,7 +115,7 @@ public:
 		mMapper->registerPoseSensor(mTfOdom);
 		
 		mScanSubscriber = create_subscription<sensor_msgs::msg::PointCloud2>(
-			"scan", 10, std::bind(&PointcloudMapper::scanCallback, this, _1));
+			"scan", 10, std::bind(&PointcloudMapper::scanCallback, this, std::placeholders::_1));
 		
 		mMapPublisher = create_publisher<sensor_msgs::msg::PointCloud2>("map", 1);
 	}
@@ -123,7 +124,8 @@ private:
 
 	void scanCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) const
 	{
-		
+		slam3d::PointCloud pc;
+		pcl::fromROSMsg(*msg, pc);
 	}
 
 	slam3d::Mapper* mMapper;
