@@ -4,8 +4,10 @@
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_srvs/srv/empty.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_listener.h>
+#include <tf2_eigen/tf2_eigen.h>
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <slam3d/graph/boost/BoostGraph.hpp>
@@ -44,32 +46,35 @@ private:
 	rclcpp::Node* mNode;
 };
 
+slam3d::Transform fromMessage(const geometry_msgs::msg::TransformStamped& tf_msg)
+{
+	Eigen::Vector3d trans(tf_msg.transform.translation.x,
+	                      tf_msg.transform.translation.y,
+	                      tf_msg.transform.translation.z);
+	Eigen::Quaterniond quat(tf_msg.transform.rotation.w,
+	                        tf_msg.transform.rotation.x,
+	                        tf_msg.transform.rotation.y,
+	                        tf_msg.transform.rotation.z);
+	slam3d::Transform tf(quat);
+	tf.translation() = trans;
+	return tf;
+}
+
 class TfOdometry : public slam3d::PoseSensor
 {
 public:
-	TfOdometry(slam3d::Graph* g, slam3d::Logger* l, tf2_ros::Buffer* tf)
-	: slam3d::PoseSensor("Odometry", g, l), mTfBuffer(tf){}
+	TfOdometry(slam3d::Graph* g, slam3d::Logger* l, tf2_ros::Buffer* tf, const std::string& robot_f, const std::string& odom_f)
+	: slam3d::PoseSensor("Odometry", g, l), mTfBuffer(tf), mRobotFrame(robot_f), mOdometryFrame(odom_f) {}
 	
 	slam3d::Transform getPose(timeval stamp)
 	{
-		geometry_msgs::msg::TransformStamped tf_msg;
 		try
 		{
-			tf_msg = mTfBuffer->lookupTransform("base_link", "odometry", fromTimeval(stamp), 50ms);
+			return fromMessage(mTfBuffer->lookupTransform(mRobotFrame, mOdometryFrame, fromTimeval(stamp), 1000ms));
 		}catch (const tf2::TransformException & ex)
 		{
 			throw slam3d::InvalidPose(ex.what());
 		}
-		Eigen::Vector3d trans(tf_msg.transform.translation.x,
-		                      tf_msg.transform.translation.y,
-		                      tf_msg.transform.translation.z);
-		Eigen::Quaterniond quat(tf_msg.transform.rotation.w,
-		                        tf_msg.transform.rotation.x,
-		                        tf_msg.transform.rotation.y,
-		                        tf_msg.transform.rotation.z);
-		slam3d::Transform tf(quat);
-		tf.translation() = trans;
-		return tf;
 	}
 	
 	void handleNewVertex(slam3d::IdType vertex)
@@ -93,6 +98,8 @@ private:
 	tf2_ros::Buffer* mTfBuffer;
 	slam3d::Transform mLastOdometricPose;
 	slam3d::IdType mLastVertex;
+	std::string mRobotFrame;
+	std::string mOdometryFrame;
 
 };
 
@@ -102,30 +109,77 @@ public:
 	PointcloudMapper() : Node("pointcloud_mapper"), mClock(this), mTfBuffer(this->get_clock()), mTfListener(mTfBuffer)
 	{
 		mLogger = new slam3d::Logger(mClock);
+		mLogger->setLogLevel(slam3d::DEBUG);
+		
 		mGraph = new slam3d::BoostGraph(mLogger);
 		mSolver = new slam3d::G2oSolver(mLogger);
 		mPclSensor = new slam3d::PointCloudSensor("Velodyne", mLogger);
+		
+		mPclSensor->setMinPoseDistance(0.5, 1.0);
+		mPclSensor->setMapResolution(0.1);
+		
+		mMapFrame = "husky/map";
+		mOdometryFrame = "husky/odom";
+		mRobotFrame = "husky/base_link";
+		mLaserFrame = "husky/base_link/front_laser";
 		
 		mGraph->setSolver(mSolver);
 		
 		mMapper = new slam3d::Mapper(mGraph, mLogger, slam3d::Transform::Identity());
 		mMapper->registerSensor(mPclSensor);
 		
-		mTfOdom = new TfOdometry(mGraph, mLogger, &mTfBuffer);
+		mTfOdom = new TfOdometry(mGraph, mLogger, &mTfBuffer, mRobotFrame, mOdometryFrame);
 		mMapper->registerPoseSensor(mTfOdom);
 		
-		mScanSubscriber = create_subscription<sensor_msgs::msg::PointCloud2>(
-			"scan", 10, std::bind(&PointcloudMapper::scanCallback, this, std::placeholders::_1));
+		mScanSubscriber = create_subscription<sensor_msgs::msg::PointCloud2>("scan", 10,
+			std::bind(&PointcloudMapper::scanCallback, this, std::placeholders::_1));
 		
-		mMapPublisher = create_publisher<sensor_msgs::msg::PointCloud2>("map", 1);
+		mMapPublisher = create_publisher<sensor_msgs::msg::PointCloud2>("map", 10);
+		
+		mGenerateMapService = create_service<std_srvs::srv::Empty>("generate_map",
+			std::bind(&PointcloudMapper::generateMap, this, std::placeholders::_1, std::placeholders::_2));
 	}
 
 private:
 
-	void scanCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) const
+	void scanCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 	{
-		slam3d::PointCloud pc;
-		pcl::fromROSMsg(*msg, pc);
+		try
+		{
+			slam3d::PointCloud::Ptr pc(new slam3d::PointCloud);
+			pcl::fromROSMsg(*msg, *pc);
+			
+			slam3d::Transform laser_pose = fromMessage(
+				mTfBuffer.lookupTransform(mLaserFrame, mRobotFrame, msg->header.stamp, 1000ms));
+			
+			slam3d::Transform odometry_pose = fromMessage(
+				mTfBuffer.lookupTransform(mRobotFrame, mOdometryFrame, msg->header.stamp, 1000ms));
+
+			slam3d::PointCloud::Ptr scan = mPclSensor->downsample(pc, 0.1);
+			
+			slam3d::PointCloudMeasurement::Ptr m(new slam3d::PointCloudMeasurement(scan, "Robot", mPclSensor->getName(), laser_pose));
+			
+			mPclSensor->addMeasurement(m, odometry_pose);
+			mLastScanTime = msg->header.stamp;
+		}
+		catch(std::exception& e)
+		{
+			mLogger->message(slam3d::ERROR, e.what());
+		}
+	}
+
+	void generateMap(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+	                       std::shared_ptr<std_srvs::srv::Empty::Response> response)
+	{
+		slam3d::VertexObjectList vertices = mGraph->getVerticesFromSensor(mPclSensor->getName());
+		slam3d::PointCloud::Ptr map = mPclSensor->buildMap(vertices);
+		std::cout << "SLAM3D Pointcloud has " << map->size() << " points." << std::endl;
+		sensor_msgs::msg::PointCloud2 pc2_msg;
+		pcl::toROSMsg(*map, pc2_msg);
+		std::cout << "ROS Pointcloud has " << pc2_msg.fields.size() << " points." << std::endl;
+		pc2_msg.header.frame_id = mMapFrame;
+		pc2_msg.header.stamp = mLastScanTime;
+		mMapPublisher->publish(pc2_msg);
 	}
 
 	slam3d::Mapper* mMapper;
@@ -136,11 +190,18 @@ private:
 	slam3d::Logger* mLogger;
 	TfOdometry* mTfOdom;
 	
+	std::string mMapFrame;
+	std::string mOdometryFrame;
+	std::string mRobotFrame;
+	std::string mLaserFrame;
+	
 	rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr mMapPublisher;
 	rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr mScanSubscriber;
+	rclcpp::Service<std_srvs::srv::Empty>::SharedPtr mGenerateMapService;
 	
 	tf2_ros::Buffer mTfBuffer;
 	tf2_ros::TransformListener mTfListener;
+	rclcpp::Time mLastScanTime;
 };
 
 int main(int argc, char * argv[])

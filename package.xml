@@ -13,8 +13,11 @@
 	<test_depend>ament_lint_common</test_depend>
 
 	<depend>rclcpp</depend>
-	<depend>std_msgs</depend>
+	<depend>sensor_msgs</depend>
+	<depend>std_srvs</depend>
 	<depend>tf2_ros</depend>
+	<depend>tf2_eigen</depend>
+	<depend>pcl_conversions</depend>
 	<depend>slam3d</depend>
 
 	<export>

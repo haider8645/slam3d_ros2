@@ -1,0 +1,26 @@
+<package>
+  <description brief="Graph-SLAM Frontend">
+    ROS2 integration for graph mapping.
+  </description>
+  <author email="sebastian.kasperski@dfki.de">Sebastian Kasperski</author>
+  <maintainer email="sebastian.kasperski@dfki.de">Sebastian Kasperski</maintainer>
+  <license>New BSD</license>
+
+  <depend package="slam/slam3d" />
+  
+  <keywords>
+    <keyword>Mapping</keyword>
+  </keywords>
+ 
+  <stage>-1</stage>
+  <use>multi project</use>
+  <activity>active</activity>
+
+  <classifiers>
+    <classifier>c++</classifier>
+    <classifier>ros2</classifier>
+  </classifiers>
+
+  <tags>unstable</tags>
+
+</package>
