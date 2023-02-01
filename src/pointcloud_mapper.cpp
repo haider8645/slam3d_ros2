@@ -7,6 +7,7 @@
 #include <std_srvs/srv/empty.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_listener.h>
+#include <tf2_ros/transform_broadcaster.h>
 #include <tf2_eigen/tf2_eigen.h>
 #include <pcl_conversions/pcl_conversions.h>
 
@@ -46,20 +47,6 @@ private:
 	rclcpp::Node* mNode;
 };
 
-slam3d::Transform fromMessage(const geometry_msgs::msg::TransformStamped& tf_msg)
-{
-	Eigen::Vector3d trans(tf_msg.transform.translation.x,
-	                      tf_msg.transform.translation.y,
-	                      tf_msg.transform.translation.z);
-	Eigen::Quaterniond quat(tf_msg.transform.rotation.w,
-	                        tf_msg.transform.rotation.x,
-	                        tf_msg.transform.rotation.y,
-	                        tf_msg.transform.rotation.z);
-	slam3d::Transform tf(quat);
-	tf.translation() = trans;
-	return tf;
-}
-
 class TfOdometry : public slam3d::PoseSensor
 {
 public:
@@ -70,7 +57,7 @@ public:
 	{
 		try
 		{
-			return fromMessage(mTfBuffer->lookupTransform(mRobotFrame, mOdometryFrame, fromTimeval(stamp), 1000ms));
+			return tf2::transformToEigen(mTfBuffer->lookupTransform(mOdometryFrame, mRobotFrame, fromTimeval(stamp), 1000ms));
 		}catch (const tf2::TransformException & ex)
 		{
 			throw slam3d::InvalidPose(ex.what());
@@ -106,7 +93,8 @@ private:
 class PointcloudMapper : public rclcpp::Node
 {
 public:
-	PointcloudMapper() : Node("pointcloud_mapper"), mClock(this), mTfBuffer(this->get_clock()), mTfListener(mTfBuffer)
+	PointcloudMapper() : Node("pointcloud_mapper"), mClock(this), mTfBuffer(this->get_clock()),
+		mTfListener(mTfBuffer), mTfBroadcaster(this)
 	{
 		mLogger = new slam3d::Logger(mClock);
 		mLogger->setLogLevel(slam3d::DEBUG);
@@ -149,18 +137,27 @@ private:
 			slam3d::PointCloud::Ptr pc(new slam3d::PointCloud);
 			pcl::fromROSMsg(*msg, *pc);
 			
-			slam3d::Transform laser_pose = fromMessage(
-				mTfBuffer.lookupTransform(mLaserFrame, mRobotFrame, msg->header.stamp, 1000ms));
+			slam3d::Transform laser_pose = tf2::transformToEigen(
+				mTfBuffer.lookupTransform(mRobotFrame, mLaserFrame, msg->header.stamp, 1000ms));
 			
-			slam3d::Transform odometry_pose = fromMessage(
-				mTfBuffer.lookupTransform(mRobotFrame, mOdometryFrame, msg->header.stamp, 1000ms));
+			slam3d::Transform odometry_pose = tf2::transformToEigen(
+				mTfBuffer.lookupTransform(mOdometryFrame, mRobotFrame, msg->header.stamp, 1000ms));
 
 			slam3d::PointCloud::Ptr scan = mPclSensor->downsample(pc, 0.1);
 			
 			slam3d::PointCloudMeasurement::Ptr m(new slam3d::PointCloudMeasurement(scan, "Robot", mPclSensor->getName(), laser_pose));
 			
-			mPclSensor->addMeasurement(m, odometry_pose);
+			if(mPclSensor->addMeasurement(m, odometry_pose))
+			{
+				// Publish "map" -> "odometry"
+				slam3d::Transform drift = mMapper->getCurrentPose() * odometry_pose.inverse();
+				mDrift = tf2::eigenToTransform(drift);
+				mDrift.header.frame_id = mMapFrame;
+				mDrift.child_frame_id = mOdometryFrame;
+			}
 			mLastScanTime = msg->header.stamp;
+			mDrift.header.stamp = mLastScanTime;
+			mTfBroadcaster.sendTransform(mDrift);
 		}
 		catch(std::exception& e)
 		{
@@ -201,7 +198,9 @@ private:
 	
 	tf2_ros::Buffer mTfBuffer;
 	tf2_ros::TransformListener mTfListener;
+	tf2_ros::TransformBroadcaster mTfBroadcaster;
 	rclcpp::Time mLastScanTime;
+	geometry_msgs::msg::TransformStamped mDrift;
 };
 
 int main(int argc, char * argv[])
