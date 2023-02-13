@@ -18,6 +18,8 @@
 
 using namespace std::chrono_literals;
 
+#define TF_TIMEOUT 50ms
+
 timeval fromRosTime(const rclcpp::Time& rt)
 {
 	timeval t;
@@ -57,7 +59,7 @@ public:
 	{
 		try
 		{
-			return tf2::transformToEigen(mTfBuffer->lookupTransform(mOdometryFrame, mRobotFrame, fromTimeval(stamp), 1000ms));
+			return tf2::transformToEigen(mTfBuffer->lookupTransform(mOdometryFrame, mRobotFrame, fromTimeval(stamp), TF_TIMEOUT));
 		}catch (const tf2::TransformException & ex)
 		{
 			throw slam3d::InvalidPose(ex.what());
@@ -72,7 +74,7 @@ public:
 		if(mLastVertex > 0)
 		{
 			slam3d::Transform t = mLastOdometricPose.inverse() * currentPose;
-			slam3d::SE3Constraint::Ptr se3(new slam3d::SE3Constraint(mName, t, slam3d::Covariance<6>::Identity() * mCovarianceScale));
+			slam3d::SE3Constraint::Ptr se3(new slam3d::SE3Constraint(mName, t, slam3d::Covariance<6>::Identity() * 0.01));
 			mGraph->addConstraint(mLastVertex, vertex, se3);
 			mGraph->setCorrectedPose(vertex, mGraph->getVertex(mLastVertex).corrected_pose * t);
 		}
@@ -103,12 +105,20 @@ public:
 		mSolver = new slam3d::G2oSolver(mLogger);
 		mPclSensor = new slam3d::PointCloudSensor("Velodyne", mLogger);
 		
-		mPclSensor->setMinPoseDistance(0.5, 1.0);
-		mPclSensor->setMapResolution(0.1);
+		slam3d::RegistrationParameters regParams;
+		regParams.point_cloud_density = 1.0;
+		regParams.maximum_iterations = 10;
+		regParams.max_correspondence_distance = 2.0;
 		
-		mMapFrame = "husky/map";
-		mOdometryFrame = "husky/odom";
-		mRobotFrame = "husky/base_link";
+		mPclSensor->setMinPoseDistance(0.5, 1.0);
+		mPclSensor->setMapResolution(0.2);
+		mPclSensor->setRegistrationParameters(regParams, false);
+		mPclSensor->setNeighborRadius(5.0, 1);
+		mPclSensor->setLinkPrevious(true);
+		
+		mMapFrame = "map";
+		mOdometryFrame = "odom";
+		mRobotFrame = "husky";
 		mLaserFrame = "husky/base_link/front_laser";
 		
 		mGraph->setSolver(mSolver);
@@ -138,10 +148,10 @@ private:
 			pcl::fromROSMsg(*msg, *pc);
 			
 			slam3d::Transform laser_pose = tf2::transformToEigen(
-				mTfBuffer.lookupTransform(mRobotFrame, mLaserFrame, msg->header.stamp, 1000ms));
+				mTfBuffer.lookupTransform(mRobotFrame, mLaserFrame, msg->header.stamp, TF_TIMEOUT));
 			
 			slam3d::Transform odometry_pose = tf2::transformToEigen(
-				mTfBuffer.lookupTransform(mOdometryFrame, mRobotFrame, msg->header.stamp, 1000ms));
+				mTfBuffer.lookupTransform(mOdometryFrame, mRobotFrame, msg->header.stamp, TF_TIMEOUT));
 
 			slam3d::PointCloud::Ptr scan = mPclSensor->downsample(pc, 0.1);
 			
@@ -168,12 +178,11 @@ private:
 	void generateMap(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
 	                       std::shared_ptr<std_srvs::srv::Empty::Response> response)
 	{
+		mGraph->optimize();
 		slam3d::VertexObjectList vertices = mGraph->getVerticesFromSensor(mPclSensor->getName());
 		slam3d::PointCloud::Ptr map = mPclSensor->buildMap(vertices);
-		std::cout << "SLAM3D Pointcloud has " << map->size() << " points." << std::endl;
 		sensor_msgs::msg::PointCloud2 pc2_msg;
 		pcl::toROSMsg(*map, pc2_msg);
-		std::cout << "ROS Pointcloud has " << pc2_msg.fields.size() << " points." << std::endl;
 		pc2_msg.header.frame_id = mMapFrame;
 		pc2_msg.header.stamp = mLastScanTime;
 		mMapPublisher->publish(pc2_msg);
