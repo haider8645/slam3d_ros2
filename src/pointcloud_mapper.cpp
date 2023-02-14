@@ -8,7 +8,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/transform_broadcaster.h>
-#include <tf2_eigen/tf2_eigen.h>
+#include <tf2_eigen/tf2_eigen.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <slam3d/graph/boost/BoostGraph.hpp>
@@ -126,8 +126,8 @@ public:
 		mMapper = new slam3d::Mapper(mGraph, mLogger, slam3d::Transform::Identity());
 		mMapper->registerSensor(mPclSensor);
 		
-		mTfOdom = new TfOdometry(mGraph, mLogger, &mTfBuffer, mRobotFrame, mOdometryFrame);
-		mMapper->registerPoseSensor(mTfOdom);
+//		mTfOdom = new TfOdometry(mGraph, mLogger, &mTfBuffer, mRobotFrame, mOdometryFrame);
+//		mMapper->registerPoseSensor(mTfOdom);
 		
 		mScanSubscriber = create_subscription<sensor_msgs::msg::PointCloud2>("scan", 10,
 			std::bind(&PointcloudMapper::scanCallback, this, std::placeholders::_1));
@@ -150,21 +150,18 @@ private:
 			slam3d::Transform laser_pose = tf2::transformToEigen(
 				mTfBuffer.lookupTransform(mRobotFrame, mLaserFrame, msg->header.stamp, TF_TIMEOUT));
 			
-			slam3d::Transform odometry_pose = tf2::transformToEigen(
-				mTfBuffer.lookupTransform(mOdometryFrame, mRobotFrame, msg->header.stamp, TF_TIMEOUT));
+//			slam3d::Transform odometry_pose = tf2::transformToEigen(
+//				mTfBuffer.lookupTransform(mOdometryFrame, mRobotFrame, msg->header.stamp, TF_TIMEOUT));
 
 			slam3d::PointCloud::Ptr scan = mPclSensor->downsample(pc, 0.1);
 			
 			slam3d::PointCloudMeasurement::Ptr m(new slam3d::PointCloudMeasurement(scan, "Robot", mPclSensor->getName(), laser_pose));
 			
-			if(mPclSensor->addMeasurement(m, odometry_pose))
-			{
-				// Publish "map" -> "odometry"
-				slam3d::Transform drift = mMapper->getCurrentPose() * odometry_pose.inverse();
-				mDrift = tf2::eigenToTransform(drift);
-				mDrift.header.frame_id = mMapFrame;
-				mDrift.child_frame_id = mOdometryFrame;
-			}
+			mPclSensor->addMeasurement(m);
+			// Publish "map" -> "robot"
+			mDrift = tf2::eigenToTransform(mPclSensor->getCurrentPose());
+			mDrift.header.frame_id = mMapFrame;
+			mDrift.child_frame_id = mRobotFrame;
 			mLastScanTime = msg->header.stamp;
 			mDrift.header.stamp = mLastScanTime;
 			mTfBroadcaster.sendTransform(mDrift);
@@ -194,7 +191,7 @@ private:
 	slam3d::PointCloudSensor* mPclSensor;
 	RosClock mClock;
 	slam3d::Logger* mLogger;
-	TfOdometry* mTfOdom;
+//	TfOdometry* mTfOdom;
 	
 	std::string mMapFrame;
 	std::string mOdometryFrame;
