@@ -134,7 +134,7 @@ public:
 		mPclSensor->setMapResolution(0.2);
 		mPclSensor->setRegistrationParameters(regParams, false);
 		mPclSensor->setNeighborRadius(5.0, 1);
-		mPclSensor->setLinkPrevious(false);
+		mPclSensor->setLinkPrevious(true);
 		
 		mMapFrame = get_parameter("map_frame").as_string();
 		mOdometryFrame = get_parameter("odometry_frame").as_string();
