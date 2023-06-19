@@ -18,9 +18,14 @@ add_executable(pointcloud_mapper
 	src/pointcloud_mapper.cpp
 )
 
+target_include_directories(pointcloud_mapper PUBLIC
+	${pcl_conversions_INCLUDE_DIRS}
+)
+
 target_link_libraries(pointcloud_mapper
 	rclcpp::rclcpp
 	tf2_ros::tf2_ros
+	tf2_eigen::tf2_eigen
 	${sensor_msgs_TARGETS}
 	${std_srvs_TARGETS}
 	${PCL_COMMON_LIBRARIES}
