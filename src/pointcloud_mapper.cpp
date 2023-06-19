@@ -39,21 +39,29 @@ rclcpp::Time fromTimeval(const timeval& tv)
 class RosClock : public slam3d::Clock
 {
 public:
-	RosClock(rclcpp::Node* n) : mNode(n){}
+	RosClock(rclcpp::Clock::SharedPtr clock) : mRosClock(clock){}
 
 	virtual timeval now()
 	{
-		return fromRosTime(mNode->now());
+		return fromRosTime(mRosClock->now());
+	}
+	
+	rclcpp::Time ros_now()
+	{
+		return mRosClock->now();
 	}
 private:
-	rclcpp::Node* mNode;
+	rclcpp::Clock::SharedPtr mRosClock;
 };
 
 class TfOdometry : public slam3d::PoseSensor
 {
 public:
 	TfOdometry(slam3d::Graph* g, slam3d::Logger* l, tf2_ros::Buffer* tf, const std::string& robot_f, const std::string& odom_f)
-	: slam3d::PoseSensor("Odometry", g, l), mTfBuffer(tf), mRobotFrame(robot_f), mOdometryFrame(odom_f) {}
+	: slam3d::PoseSensor("Odometry", g, l), mTfBuffer(tf), mRobotFrame(robot_f), mOdometryFrame(odom_f)
+	{
+		mLastVertex = 0;
+	}
 	
 	slam3d::Transform getPose(timeval stamp)
 	{
@@ -75,7 +83,14 @@ public:
 		{
 			slam3d::Transform t = mLastOdometricPose.inverse() * currentPose;
 			slam3d::SE3Constraint::Ptr se3(new slam3d::SE3Constraint(mName, t, slam3d::Covariance<6>::Identity() * 0.01));
-			mGraph->addConstraint(mLastVertex, vertex, se3);
+			try
+			{
+				mGraph->addConstraint(mLastVertex, vertex, se3);
+			}catch(std::exception &e)
+			{
+				std::cout << "Failed to link vertex " << vertex << " to " << mLastVertex << std::endl;
+				return;
+			}
 			mGraph->setCorrectedPose(vertex, mGraph->getVertex(mLastVertex).corrected_pose * t);
 		}
 		
@@ -95,9 +110,14 @@ private:
 class PointcloudMapper : public rclcpp::Node
 {
 public:
-	PointcloudMapper() : Node("pointcloud_mapper"), mClock(this), mTfBuffer(this->get_clock()),
+	PointcloudMapper() : Node("pointcloud_mapper"), mClock(this->get_clock()), mTfBuffer(this->get_clock()),
 		mTfListener(mTfBuffer), mTfBroadcaster(this)
 	{
+		declare_parameter("map_frame", "map");
+		declare_parameter("odometry_frame", "odometry");
+		declare_parameter("robot_frame", "robot");
+		declare_parameter("laser_frame", "laser");
+
 		mLogger = new slam3d::Logger(mClock);
 		mLogger->setLogLevel(slam3d::DEBUG);
 		
@@ -110,27 +130,31 @@ public:
 		regParams.maximum_iterations = 10;
 		regParams.max_correspondence_distance = 2.0;
 		
-		mPclSensor->setMinPoseDistance(0.5, 1.0);
+		mPclSensor->setMinPoseDistance(0.25, 0.5);
 		mPclSensor->setMapResolution(0.2);
 		mPclSensor->setRegistrationParameters(regParams, false);
 		mPclSensor->setNeighborRadius(5.0, 1);
-		mPclSensor->setLinkPrevious(true);
+		mPclSensor->setLinkPrevious(false);
 		
-		mMapFrame = "map";
-		mOdometryFrame = "odom";
-		mRobotFrame = "husky";
-		mLaserFrame = "husky/base_link/front_laser";
+		mMapFrame = get_parameter("map_frame").as_string();
+		mOdometryFrame = get_parameter("odometry_frame").as_string();
+		mRobotFrame = get_parameter("robot_frame").as_string();
+
+		mDrift.header.frame_id = mMapFrame;
+		mDrift.child_frame_id = mOdometryFrame;
 		
 		mGraph->setSolver(mSolver);
 		
 		mMapper = new slam3d::Mapper(mGraph, mLogger, slam3d::Transform::Identity());
 		mMapper->registerSensor(mPclSensor);
 		
-//		mTfOdom = new TfOdometry(mGraph, mLogger, &mTfBuffer, mRobotFrame, mOdometryFrame);
-//		mMapper->registerPoseSensor(mTfOdom);
+		mTfOdom = new TfOdometry(mGraph, mLogger, &mTfBuffer, mRobotFrame, mOdometryFrame);
+		mMapper->registerPoseSensor(mTfOdom);
 		
 		mScanSubscriber = create_subscription<sensor_msgs::msg::PointCloud2>("scan", 10,
 			std::bind(&PointcloudMapper::scanCallback, this, std::placeholders::_1));
+		
+		mTransformTimer = create_wall_timer(100ms, std::bind(&PointcloudMapper::timerCallback, this));
 		
 		mMapPublisher = create_publisher<sensor_msgs::msg::PointCloud2>("map", 10);
 		
@@ -140,6 +164,12 @@ public:
 
 private:
 
+	void timerCallback()
+	{
+		mDrift.header.stamp = mClock.ros_now();
+		mTfBroadcaster.sendTransform(mDrift);
+	}
+
 	void scanCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 	{
 		try
@@ -148,23 +178,21 @@ private:
 			pcl::fromROSMsg(*msg, *pc);
 			
 			slam3d::Transform laser_pose = tf2::transformToEigen(
-				mTfBuffer.lookupTransform(mRobotFrame, mLaserFrame, msg->header.stamp, TF_TIMEOUT));
-			
-//			slam3d::Transform odometry_pose = tf2::transformToEigen(
-//				mTfBuffer.lookupTransform(mOdometryFrame, mRobotFrame, msg->header.stamp, TF_TIMEOUT));
+				mTfBuffer.lookupTransform(mRobotFrame, msg->header.frame_id, msg->header.stamp, TF_TIMEOUT));
+
+			slam3d::Transform odometry_pose = tf2::transformToEigen(
+				mTfBuffer.lookupTransform(mOdometryFrame, mRobotFrame, msg->header.stamp, TF_TIMEOUT));
 
 			slam3d::PointCloud::Ptr scan = mPclSensor->downsample(pc, 0.1);
 			
 			slam3d::PointCloudMeasurement::Ptr m(new slam3d::PointCloudMeasurement(scan, "Robot", mPclSensor->getName(), laser_pose));
 			
-			mPclSensor->addMeasurement(m);
-			// Publish "map" -> "robot"
-			mDrift = tf2::eigenToTransform(mPclSensor->getCurrentPose());
-			mDrift.header.frame_id = mMapFrame;
-			mDrift.child_frame_id = mRobotFrame;
-			mLastScanTime = msg->header.stamp;
-			mDrift.header.stamp = mLastScanTime;
-			mTfBroadcaster.sendTransform(mDrift);
+			if(mPclSensor->addMeasurement(m, odometry_pose))
+			{
+				mDrift = tf2::eigenToTransform(slam3d::orthogonalize(mPclSensor->getCurrentPose() * odometry_pose.inverse()));
+				mDrift.header.frame_id = mMapFrame;
+				mDrift.child_frame_id = mOdometryFrame;
+			}
 		}
 		catch(std::exception& e)
 		{
@@ -181,7 +209,7 @@ private:
 		sensor_msgs::msg::PointCloud2 pc2_msg;
 		pcl::toROSMsg(*map, pc2_msg);
 		pc2_msg.header.frame_id = mMapFrame;
-		pc2_msg.header.stamp = mLastScanTime;
+		pc2_msg.header.stamp = mClock.ros_now();
 		mMapPublisher->publish(pc2_msg);
 	}
 
@@ -191,21 +219,20 @@ private:
 	slam3d::PointCloudSensor* mPclSensor;
 	RosClock mClock;
 	slam3d::Logger* mLogger;
-//	TfOdometry* mTfOdom;
+	TfOdometry* mTfOdom;
 	
 	std::string mMapFrame;
 	std::string mOdometryFrame;
 	std::string mRobotFrame;
-	std::string mLaserFrame;
 	
 	rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr mMapPublisher;
 	rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr mScanSubscriber;
 	rclcpp::Service<std_srvs::srv::Empty>::SharedPtr mGenerateMapService;
+	rclcpp::TimerBase::SharedPtr mTransformTimer;
 	
 	tf2_ros::Buffer mTfBuffer;
 	tf2_ros::TransformListener mTfListener;
 	tf2_ros::TransformBroadcaster mTfBroadcaster;
-	rclcpp::Time mLastScanTime;
 	geometry_msgs::msg::TransformStamped mDrift;
 };
 
