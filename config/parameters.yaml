@@ -1,0 +1,6 @@
+pointcloud_mapper:
+  ros__parameters:
+    map_frame: "map"
+    odometry_frame: "world"
+    robot_frame: "base_link"
+    laser_frame: "velo_link"
